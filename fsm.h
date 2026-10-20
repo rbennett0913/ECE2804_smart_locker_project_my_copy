@@ -2,15 +2,16 @@
 #define fsm_h
 
 #include "keypad.h"   /* key_t */
-#define LOCK_TIMEOUT 250UL
+#define LOCK_TIMEOUT      250UL     /* ms to let the servo move before the block check */
+#define SLEEP_TIMEOUT_MS  15000UL   /* ms of no key presses before power-down */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* One-time bring-up: initializes PWM + ADC, physically asserts the
- * locked position, and starts the sleep-timeout clock.
- * Call exactly once (from setup()). */
+/* One-time bring-up: PWM, ADC, current sense, saved code from EEPROM,
+ * wake source; physically asserts the locked position and starts the
+ * sleep-timeout clock. Call exactly once (from setup()). */
 void fsm_init(void);
 
 /* Runs one iteration of the main loop: services the millisecond tick
