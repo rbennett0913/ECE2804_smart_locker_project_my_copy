@@ -1,18 +1,25 @@
 /* Arduino Uno sketch: servo-actuated keypad lock.
  *
-
-
+ *
  * The Arduino core supplies main(), which calls setup() once and then
  * calls loop() forever. All real work lives in the C modules (fsm.c,
- * pwm.c, keypad.c, locker.c) next to this sketch; this file is only the
- * glue. Those modules talk to the hardware through direct ATmega328P
- * register access (see their headers) -- no Arduino/Servo libraries are
- * used, by design.
+ * pwm.c, keypad.c, locker.c); this file is the glue, and it also owns
+ * every serial message the user sees.
+ *
+ * The ATmega328P project uses the same modules and supplies its own
+ * implementations of the three fsm_on_* hooks, so this sketch's messages
+ * and the chip's messages stay identical.
  *
  * Wiring:
  *   keypad (resistor ladder) -> A0  (ADC0 / PC0, see KEYPAD_CHANNEL)
  *   servo signal             -> D9  (OC1A / PB1)
  *   servo current shunt      -> A1  (ADC1 / PC1, see CURRENT_CHANNEL)
+ *
+ * User feedback: three hooks print what the system is doing.
+ *   fsm_on_event()           state changes: boot, sleep, wake, locked, ...
+ *   fsm_on_digit()           each accepted digit, as a masked '*'
+ *   fsm_on_password_result() accept / reject of a submitted code
+ * To silence the messages, comment out the FSM_ON_* calls in fsm.c.
  */
 
 #include "fsm.h"
@@ -27,14 +34,71 @@
    picking BLOCK_THRESHOLD_MV in current.h. */
 //#define DEBUG_CURRENT
 
+/* ---- the user-facing messages (single source of truth on the Uno) ---- */
+
+/* One '*' per accepted digit: the code itself never goes out over serial. */
+void fsm_on_digit(unsigned char digit) {
+    (void)digit;
+    Serial.print('*');
+}
+
+void fsm_on_password_result(unsigned char ok) {
+    if (ok) {
+        Serial.println(F("\r\nACCESS GRANTED - unlocked. '*' locks, '#' sets a new code."));
+    } else {
+        Serial.println(F("\r\nACCESS DENIED - wrong passcode."));
+    }
+}
+
+void fsm_on_event(unsigned char event) {
+    switch (event) {
+        case FSM_EVT_BOOT:
+            Serial.println(F("\r\n=== Personal Smart Locker ==="));
+            Serial.println(F("Status: LOCKED. Enter passcode, then '#'."));
+            break;
+        case FSM_EVT_SLEEP_ENTERING:
+            Serial.println(F("\r\nEntering power-down sleep mode..."));
+            break;
+        case FSM_EVT_WAKE:
+            Serial.println(F("\r\nWoke up from sleep."));
+            Serial.println(F("Status: back in the previous state."));
+            break;
+        case FSM_EVT_LOCKED:
+            Serial.println(F("\r\nLOCKED."));
+            break;
+        case FSM_EVT_BLOCKED_REVERT:
+            Serial.println(F("\r\nBLOCKED! Motor could not turn - reverted to unlocked."));
+            break;
+        case FSM_EVT_REPROGRAM_START:
+            Serial.println(F("\r\nSet new passcode: enter 4 digits, '#' to save, '*' to cancel."));
+            break;
+        case FSM_EVT_CODE_SAVED:
+            Serial.println(F("\r\nNew passcode saved to EEPROM."));
+            break;
+        case FSM_EVT_REPROGRAM_CANCEL:
+            Serial.println(F("\r\nNew passcode cancelled - old code unchanged."));
+            break;
+        case FSM_EVT_ENTRY_INCOMPLETE:
+            Serial.println(F("\r\nIncomplete entry - cleared."));
+            break;
+        default:
+            break;
+    }
+}
+
+/* ---- setup / loop ---------------------------------------------------- */
+
 void setup() {
-    fsm_init();
+    /* Serial first, so fsm_init()'s boot message has somewhere to go. */
     Serial.begin(9600);
+    fsm_init();
+
     /* Boot banner: proves the MCU is running and the serial link works
        before any key is pressed. If it only shows up at 600 or 4800 baud
        the chip is on its internal oscillator (1 MHz / 8 MHz), not the
        16 MHz crystal -- see "Standalone ATmega328P" in the README. */
     Serial.println(F("servo_locker boot"));
+    Serial.flush();
 }
 
 void loop() {
@@ -61,20 +125,21 @@ void loop() {
        keypress before the FSM could see it. */
     key_t key = keypad_read();
 
+    /* One line per key press: makes serial output and a logic-analyzer or
+       scope capture directly comparable. */
     switch (key) {
-        //case KEY_NONE: Serial.println("none"); break;
-        case KEY_0:    Serial.println('0'); break;
-        case KEY_1:    Serial.println('1'); break;
-        case KEY_2:    Serial.println('2'); break;
-        case KEY_3:    Serial.println('3'); break;
-        case KEY_4:    Serial.println('4'); break;
-        case KEY_5:    Serial.println('5'); break;
-        case KEY_6:    Serial.println('6'); break;
-        case KEY_7:    Serial.println('7'); break;
-        case KEY_8:    Serial.println('8'); break;
-        case KEY_9:    Serial.println('9'); break;
-        case KEY_STAR: Serial.println('*'); break;
-        case KEY_POUND:Serial.println('#'); break;
+        case KEY_0:    Serial.println(F("Key Pressed: 0")); break;
+        case KEY_1:    Serial.println(F("Key Pressed: 1")); break;
+        case KEY_2:    Serial.println(F("Key Pressed: 2")); break;
+        case KEY_3:    Serial.println(F("Key Pressed: 3")); break;
+        case KEY_4:    Serial.println(F("Key Pressed: 4")); break;
+        case KEY_5:    Serial.println(F("Key Pressed: 5")); break;
+        case KEY_6:    Serial.println(F("Key Pressed: 6")); break;
+        case KEY_7:    Serial.println(F("Key Pressed: 7")); break;
+        case KEY_8:    Serial.println(F("Key Pressed: 8")); break;
+        case KEY_9:    Serial.println(F("Key Pressed: 9")); break;
+        case KEY_STAR: Serial.println(F("Key Pressed: *")); break;
+        case KEY_POUND:Serial.println(F("Key Pressed: #")); break;
         default: break;  /* KEY_NONE */
     }
 
