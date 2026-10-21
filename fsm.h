@@ -37,6 +37,10 @@ void fsm_on_digit(unsigned char digit);
 /* A full code was submitted: ok = 1 correct, 0 wrong. */
 void fsm_on_password_result(unsigned char ok);
 
+/* TEMPORARY: one raw byte of diagnostic state for the sleep investigation.
+ * Drop this hook and FSM_EVT_DEBUG when SLEEP_DEBUG goes back to 0. */
+void fsm_on_debug(unsigned char code);
+
 #define FSM_EVT_BOOT              0   /* boot finished, system is locked */
 #define FSM_EVT_SLEEP_ENTERING    1   /* about to power down */
 #define FSM_EVT_WAKE              2   /* just woke up */
@@ -46,6 +50,7 @@ void fsm_on_password_result(unsigned char ok);
 #define FSM_EVT_CODE_SAVED        6   /* new code written to EEPROM */
 #define FSM_EVT_REPROGRAM_CANCEL  7   /* new-code entry abandoned */
 #define FSM_EVT_ENTRY_INCOMPLETE  8   /* '#' with fewer than PIN_LEN digits */
+#define FSM_EVT_DEBUG             9   /* TEMPORARY: see fsm_on_debug() */
 
 #ifdef __cplusplus
 }
