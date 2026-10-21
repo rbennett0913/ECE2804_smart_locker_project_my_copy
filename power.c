@@ -2,14 +2,16 @@
 
 /* =====================================================================
  * Registers, declared by hand so this project needs no <avr/io.h>.
- * Addresses are data-space addresses from the ATmega328P datasheet.
+ * The REG8() addresses below are DATA-space addresses, used with a
+ * normal C load/store. The inline asm at the bottom needs the I/O-space
+ * addresses instead, which are 0x20 lower and must fit in six bits.
  * ===================================================================== */
 #define REG8(a) (*(volatile unsigned char *)(a))
 
-#define P_TIFR1   REG8(0x36)
-#define P_PCIFR   REG8(0x3B)
-#define P_SMCR    REG8(0x53)
-#define P_MCUCR   REG8(0x55)
+#define P_TIFR1   REG8(0x36)   /* I/O 0x16 */
+#define P_PCIFR   REG8(0x3B)   /* I/O 0x1B */
+#define P_SMCR    REG8(0x53)   /* I/O 0x33 */
+#define P_MCUCR   REG8(0x55)   /* I/O 0x35 */
 #define P_PCICR   REG8(0x68)
 #define P_PCMSK1  REG8(0x6C)
 #define P_TIMSK0  REG8(0x6E)
@@ -21,6 +23,12 @@
 #define P_TCCR0B  REG8(0x45)
 #define P_DDRD    REG8(0x2A)
 #define P_PORTD   REG8(0x2B)
+
+/* I/O-space addresses for the asm block. Only these three are ever
+ * touched with in/out; everything else uses the C macros above. */
+#define IO_PCIFR  0x1B
+#define IO_SMCR   0x33
+#define IO_MCUCR  0x35
 
 /* TIFR1 */
 #define B_TOV1     0
@@ -165,28 +173,37 @@ unsigned char power_sleep(void)
      *    BODSE clear) within the next four clock cycles, and the sleep must
      *    follow immediately. All of it lives in one asm block so no
      *    function call or interrupt can slip in between. BODS and BODSE are
-     *    bits 6 and 5 of MCUCR (0x55), so 0xC0 sets both and 0x40 leaves
-     *    BODS alone. */
+     *    bits 6 and 5 of MCUCR, so 0xC0 sets both and 0x40 leaves BODS
+     *    alone while clearing BODSE.
+     *
+     *    in/out take the I/O address, which is the data address minus
+     *    0x20, so MCUCR is 0x35, SMCR is 0x33 and PCIFR is 0x1B. Those
+     *    values are passed through the constraints below rather than
+     *    written into the string, so the operand check happens in gcc. */
     __asm__ __volatile__ (
-        "cli"                "\n\t"
-        "in  r24, 0x3B"      "\n\t"   /* PCIFR : drop any stale wake flag */
-        "out 0x3B, r24"      "\n\t"
-        "in  r24, 0x55"      "\n\t"   /* MCUCR : set BODS + BODSE         */
-        "ori r24, 0xC0"      "\n\t"
-        "out 0x55, r24"      "\n\t"
-        "ldi r25, 0x40"      "\n\t"   /* MCUCR : BODS only, BODSE clear   */
-        "out 0x55, r25"      "\n\t"
-        "ldi r25, 0x21"      "\n\t"   /* SMCR  : SM1 | SE, power-down     */
-        "out 0x53, r25"      "\n\t"
-        "sei"                "\n\t"   /* the instruction after SEI runs   */
-        "sleep"              "\n\t"   /* BOD takes effect only now        */
-        "in  r24, 0x55"      "\n\t"   /* MCUCR : BODS/BODSE back off      */
-        "andi r24, 0x3F"     "\n\t"
-        "out 0x55, r24"      "\n\t"
-        "in  r24, 0x53"      "\n\t"   /* SMCR  : SE clear, mode idle      */
-        "andi r24, 0xFE"     "\n\t"
-        "out 0x53, r24"      "\n\t"
-        ::: "r24", "r25", "memory"
+        "cli"                    "\n\t"
+        "in  r24, %[pcifr]"      "\n\t"   /* drop any stale wake flag */
+        "out %[pcifr], r24"      "\n\t"
+        "in  r24, %[mcucr]"      "\n\t"   /* set BODS + BODSE          */
+        "ori r24, 0xC0"          "\n\t"
+        "out %[mcucr], r24"      "\n\t"
+        "ldi r25, 0x40"          "\n\t"   /* BODS only, BODSE clear    */
+        "out %[mcucr], r25"      "\n\t"
+        "ldi r25, 0x21"          "\n\t"   /* SM1 | SE, power-down      */
+        "out %[smcr], r25"       "\n\t"
+        "sei"                    "\n\t"   /* the next instruction runs */
+        "sleep"                  "\n\t"   /* BOD takes effect only now */
+        "in  r24, %[mcucr]"      "\n\t"   /* BODS/BODSE back off       */
+        "andi r24, 0x3F"         "\n\t"
+        "out %[mcucr], r24"      "\n\t"
+        "in  r24, %[smcr]"       "\n\t"   /* SE clear, mode idle       */
+        "andi r24, 0xFE"         "\n\t"
+        "out %[smcr], r24"       "\n\t"
+        :
+        : [mcucr] "M" (IO_MCUCR),
+          [smcr]  "M" (IO_SMCR),
+          [pcifr] "M" (IO_PCIFR)
+        : "r24", "r25", "memory"
     );
 
     /* ---- awake ---- */
