@@ -24,8 +24,8 @@
 #define P_DDRD    REG8(0x2A)
 #define P_PORTD   REG8(0x2B)
 
-/* I/O-space addresses for the asm block. Only these three are ever
- * touched with in/out; everything else uses the C macros above. */
+/* I/O-space addresses for the asm block. Only these are ever touched
+ * with in/out; everything else uses the C macros above. */
 #define IO_PCIFR  0x1B
 #define IO_SMCR   0x33
 #define IO_MCUCR  0x35
@@ -49,6 +49,17 @@
 #define B_PRUSART0 1
 #define B_PRSPI0   2
 #define B_PRTIM1   3
+
+/* Brown-out detector disable for the sleep window.
+ *
+ * The MCUCR BODS/BODSE sequence has a hard four-cycle rule and is the
+ * fiddliest part of this file, so it is switchable. It is OFF by default
+ * because it is what stops the chip waking when the timing is wrong.
+ *
+ * The clean way to get the same saving is the extended fuse instead:
+ * set efuse to 0xFF and the BOD is simply never enabled, so no sequence
+ * is needed at all. See the notes in power.h. */
+#define BOD_DISABLE_ON_SLEEP 0
 
 /* Hardware cutoffs. Wire these to the high-side switches when the
  * transistors are on the board; with the flags at 0 the firmware runs
@@ -77,6 +88,12 @@ void power_init(void)
     P_PCMSK1 |=  (1 << B_PCINT8);
     /* PCIE1 stays off until sleep, so ordinary typing doesn't fire a
      * stream of interrupts. */
+
+    /* Clear any wake flag left over from boot, so the first sleep isn't
+     * entered with a pending interrupt already latched. */
+    if (P_PCIFR & (1 << B_PCIF1)) {
+        P_PCIFR = (1 << B_PCIF1);
+    }
 
 #if HW_SERVO_CUTOFF_ENABLE
     /* High-side switch: drive low = servo supplied. Assert that at boot
@@ -167,46 +184,50 @@ unsigned char power_sleep(void)
      *    saved above and restored on wake. */
     P_PRR |= (1 << B_PRUSART0) | (1 << B_PRSPI0) | (1 << B_PRTIM1);
 
-    /* 5. Drop into power-down with the brown-out detector off for the
-     *    duration. The BOD-disable sequence has a hard timing rule: after
-     *    BODS and BODSE are set together, BODS must be written again (with
-     *    BODSE clear) within the next four clock cycles, and the sleep must
-     *    follow immediately. All of it lives in one asm block so no
-     *    function call or interrupt can slip in between. BODS and BODSE are
-     *    bits 6 and 5 of MCUCR, so 0xC0 sets both and 0x40 leaves BODS
-     *    alone while clearing BODSE.
+    /* 5. Arm the wake source, drop any stale flag, enter power-down and
+     *    let a key press bring us back.
      *
-     *    in/out take the I/O address, which is the data address minus
-     *    0x20, so MCUCR is 0x35, SMCR is 0x33 and PCIFR is 0x1B. Those
-     *    values are passed through the constraints below rather than
-     *    written into the string, so the operand check happens in gcc. */
+     *    PCMSK1 already includes PCINT8 from power_init(); PCIE1 is
+     *    switched on only here, so ordinary typing doesn't fire interrupts.
+     *    sei goes over a single instruction before sleep, and an interrupt
+     *    arriving in that window sets its flag rather than being lost, so
+     *    no key press can fall between the two. */
+    P_PCICR |= (1 << B_PCIE1);
+    P_PCIFR  = (1 << B_PCIF1);            /* writing 1 clears the flag */
+    P_SMCR   = (1 << B_SM1) | (1 << B_SE);/* power-down, sleep enabled */
+
+#if BOD_DISABLE_ON_SLEEP
+    /* The four-cycle window is the fragile part, so all of it is in one
+     * block and nothing can slip between the two MCUCR writes and the
+     * sleep. MCUCR is read-modify-written so its other bits survive. */
     __asm__ __volatile__ (
         "cli"                    "\n\t"
-        "in  r24, %[pcifr]"      "\n\t"   /* drop any stale wake flag */
-        "out %[pcifr], r24"      "\n\t"
-        "in  r24, %[mcucr]"      "\n\t"   /* set BODS + BODSE          */
-        "ori r24, 0xC0"          "\n\t"
+        "in  r24, %[mcucr]"      "\n\t"   /* read, don't clobber the rest */
+        "ori r24, 0xC0"          "\n\t"   /* BODS + BODSE                 */
         "out %[mcucr], r24"      "\n\t"
-        "ldi r25, 0x40"          "\n\t"   /* BODS only, BODSE clear    */
-        "out %[mcucr], r25"      "\n\t"
-        "ldi r25, 0x21"          "\n\t"   /* SM1 | SE, power-down      */
-        "out %[smcr], r25"       "\n\t"
-        "sei"                    "\n\t"   /* the next instruction runs */
-        "sleep"                  "\n\t"   /* BOD takes effect only now */
-        "in  r24, %[mcucr]"      "\n\t"   /* BODS/BODSE back off       */
+        "ori r24, 0x40"          "\n\t"   /* BODS again, BODSE cleared    */
+        "andi r24, 0xDF"         "\n\t"
+        "out %[mcucr], r24"      "\n\t"
+        "sei"                    "\n\t"
+        "sleep"                  "\n\t"
+        "in  r24, %[mcucr]"      "\n\t"   /* switch the BOD back on       */
         "andi r24, 0x3F"         "\n\t"
         "out %[mcucr], r24"      "\n\t"
-        "in  r24, %[smcr]"       "\n\t"   /* SE clear, mode idle       */
-        "andi r24, 0xFE"         "\n\t"
-        "out %[smcr], r24"       "\n\t"
         :
-        : [mcucr] "M" (IO_MCUCR),
-          [smcr]  "M" (IO_SMCR),
-          [pcifr] "M" (IO_PCIFR)
-        : "r24", "r25", "memory"
+        : [mcucr] "M" (IO_MCUCR)
+        : "r24", "memory"
     );
+#else
+    /* BOD left alone: plain sleep. */
+    __asm__ __volatile__ ("sei" "\n\t" "sleep" ::: "memory");
+#endif
 
     /* ---- awake ---- */
+
+    /* Disarm the wake source immediately, so the rest of this function
+     * runs without a stray interrupt. */
+    P_SMCR   = 0;                        /* SE clear, idle mode */
+    P_PCICR &= ~(1 << B_PCIE1);
 
     /* Undo the clock gating, then restore Timer0 to exactly what the core
      * left it as. */
