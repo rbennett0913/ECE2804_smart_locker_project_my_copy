@@ -9,8 +9,8 @@ reprogram : digits fill the new-code buffer
             '#' with exactly 4 digits -> save to EEPROM -> unlocked
             '*' -> cancel -> unlocked
 any state : SLEEP_TIMEOUT_MS with no key -> sleep (power-down)
-sleep     : key press wakes -> back to the state it slept from
-            (the waking key is not used as input)
+sleep     : key press or wake button -> back to the state it slept from,
+            and the clock is re-based so the user gets a full timeout window
 
 User feedback: every state change calls a status hook so the user can see
 what the system just did. The hooks are implemented with the sketch (and
@@ -39,10 +39,24 @@ static state_t prev_state;           /* state to return to after waking */
 static unsigned long locking_start;  /* used for checking for block */
 static unsigned long last_activity;  /* for the sleep timeout */
 
+/* Wall time spent asleep. See the note on the clock in pwm.c: the
+ * millisecond counter is driven by Timer1 overflows and Timer1 is gated
+ * during power-down, so it does not advance while the chip is down.
+ * Every timer comparison adds this offset back in, which stops a wake
+ * from immediately re-triggering the sleep timeout. */
+static unsigned long sleep_offset = 0;
+
 static key_t new_code[PIN_LEN];      /* reprogram buffer */
 static unsigned int new_len = 0;
 
 static void announce(unsigned char event) { fsm_on_event(event); }
+
+/* Clock reading with the asleep time added back in. Use this anywhere a
+ * duration is compared; milliseconds() alone is for stamping a start
+ * point, which is immune to the offset. */
+static unsigned long now_ms(void) {
+  return milliseconds() + sleep_offset;
+}
 
 static void handle_locked(key_t key, unsigned long now) {
   (void)now;
@@ -139,13 +153,19 @@ static void handle_sleep(key_t key, unsigned long now) {
     return;
   }
 
-  power_sleep();               /* returns only after a key press */
+  /* power_sleep() blocks here until a key or the wake button brings the
+   * chip back, so the time it takes to return is the time we were down. */
+  unsigned long before = milliseconds();
+  power_sleep();
+  sleep_offset += milliseconds() - before;
 
   /* First conversion after re-enabling the ADC is a throwaway. */
   (void)adc_read_channel(KEYPAD_CHANNEL);
-  last_activity = milliseconds();
-  /* If the wake was just noise, the next loop sees KEY_NONE and this
-     handler puts the chip straight back to sleep. */
+
+  /* Start a fresh timeout window on the re-based clock. If the wake was
+   * only noise, the next tick sees KEY_NONE against this stamp and puts
+   * the chip straight back down. */
+  last_activity = now_ms();
 }
 
 void fsm_init(void) {
@@ -153,16 +173,17 @@ void fsm_init(void) {
   adc_init();
   current_init();
   locker_init();               /* load saved code from EEPROM */
-  power_init();                /* key press on A0 wakes from sleep */
+  power_init();                /* key press or wake button */
   setPosLock();  /* physically assert the locked position: the FSM starts
                     in STATE_LOCKED, and an uncommanded servo holds no torque */
+  sleep_offset = 0;
   last_activity = milliseconds();
   announce(FSM_EVT_BOOT);
 }
 
 void fsm_tick(key_t key) {
   tick_update();
-  unsigned long now = milliseconds();
+  unsigned long now = now_ms();
 
   /* global timeout rule: SLEEP_TIMEOUT_MS of no input -> sleep */
   if (key != KEY_NONE) {
