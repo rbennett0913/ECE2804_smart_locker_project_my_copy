@@ -2,7 +2,11 @@
 #define fsm_h
 
 #include "keypad.h"   /* key_t */
-#define LOCK_TIMEOUT      250UL     /* ms to let the servo move before the block check */
+
+/* ms to let the servo finish its move before the block check. An SG90
+ * takes ~0.3 s for the full lock/unlock swing; 600 ms leaves margin and
+ * still answers well inside the spec's 1 s blocked-motor deadline. */
+#define LOCK_TIMEOUT      600UL
 #define SLEEP_TIMEOUT_MS  15000UL   /* ms of no key presses before power-down */
 
 #ifdef __cplusplus
@@ -37,7 +41,7 @@ void fsm_on_digit(unsigned char digit);
 void fsm_on_password_result(unsigned char ok);
 
 #define FSM_EVT_BOOT              0   /* boot finished, system is locked */
-#define FSM_EVT_SLEEP_ENTERING    1   /* about to power down */
+#define FSM_EVT_SLEEP_ENTERING    1   /* about to power down: flush output here */
 #define FSM_EVT_WAKE              2   /* wake button pressed, back awake */
 #define FSM_EVT_LOCKED            3   /* servo finished moving to locked */
 #define FSM_EVT_BLOCKED_REVERT    4   /* motor blocked: went back to unlocked */

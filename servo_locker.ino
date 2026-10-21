@@ -1,25 +1,16 @@
-/* Arduino Uno sketch: servo-actuated keypad lock.
- *
+/* Arduino sketch: servo-actuated keypad lock.
  *
  * The Arduino core supplies main(), which calls setup() once and then
  * calls loop() forever. All real work lives in the C modules (fsm.c,
- * pwm.c, keypad.c, locker.c); this file is the glue, and it also owns
- * every serial message the user sees.
- *
- * The ATmega328P project uses the same modules and supplies its own
- * implementations of the three fsm_on_* hooks, so this sketch's messages
- * and the chip's messages stay identical.
+ * pwm.c, keypad.c, locker.c, power.c); this file is the glue, and it also
+ * owns every serial message the user sees.
  *
  * Wiring:
  *   keypad (resistor ladder) -> A0  (ADC0 / PC0, see KEYPAD_CHANNEL)
  *   servo signal             -> D9  (OC1A / PB1)
- *   servo current shunt      -> A1  (ADC1 / PC1, see CURRENT_CHANNEL)
- *
- * User feedback: three hooks print what the system is doing.
- *   fsm_on_event()           state changes: boot, sleep, wake, locked, ...
- *   fsm_on_digit()           each accepted digit, as a masked '*'
- *   fsm_on_password_result() accept / reject of a submitted code
- * To silence the messages, comment out the FSM_ON_* calls in fsm.c.
+ *   servo supply switch      -> D4  (2N3906 base, LOW = servo on)
+ *   wake button              -> D2  (to GND, internal pull-up)
+ *   servo current shunt      -> A1  (not fitted yet; detection disabled)
  */
 
 #include "fsm.h"
@@ -30,11 +21,7 @@
    checking it against the thresholds in keypad.h. */
 //#define DEBUG_ADC
 
-/* Uncomment to print the averaged shunt voltage (mV) twice a second, for
-   picking BLOCK_THRESHOLD_MV in current.h. */
-//#define DEBUG_CURRENT
-
-/* ---- the user-facing messages (single source of truth on the Uno) ---- */
+/* ---- the user-facing messages ---------------------------------------- */
 
 /* One '*' per accepted digit: the code itself never goes out over serial. */
 void fsm_on_digit(unsigned char digit) {
@@ -58,10 +45,12 @@ void fsm_on_event(unsigned char event) {
             break;
         case FSM_EVT_SLEEP_ENTERING:
             Serial.println(F("\r\nEntering power-down sleep mode..."));
+            /* power_sleep() gates the USART clock next; finish sending
+               first or the message is cut off mid-transmission. */
+            Serial.flush();
             break;
         case FSM_EVT_WAKE:
             Serial.println(F("\r\nWoke up from sleep."));
-            Serial.println(F("Status: back in the previous state."));
             break;
         case FSM_EVT_LOCKED:
             Serial.println(F("\r\nLOCKED."));
@@ -93,10 +82,9 @@ void setup() {
     Serial.begin(9600);
     fsm_init();
 
-    /* Boot banner: proves the MCU is running and the serial link works
-       before any key is pressed. If it only shows up at 600 or 4800 baud
-       the chip is on its internal oscillator (1 MHz / 8 MHz), not the
-       16 MHz crystal -- see "Standalone ATmega328P" in the README. */
+    /* Boot banner: proves the MCU is running and the serial link works.
+       If it only shows up at 600 or 4800 baud the chip is on its internal
+       oscillator, not the 16 MHz crystal -- see the README. */
     Serial.println(F("servo_locker boot"));
     Serial.flush();
 }
@@ -110,23 +98,11 @@ void loop() {
         Serial.println(adc_read_channel(KEYPAD_CHANNEL));
     }
 #endif
-#ifdef DEBUG_CURRENT
-    static unsigned long last_cur;
-    if (millis() - last_cur >= 500UL) {
-        last_cur = millis();
-        Serial.print(F("shunt_mv="));
-        Serial.println(current_read_mv());
-    }
-#endif
 
     /* Poll the keypad exactly ONCE per iteration: keypad_read() is
-       edge-triggered (one event per physical press), so calling it both
-       here for debugging and inside fsm_tick() would swallow every
-       keypress before the FSM could see it. */
+       edge-triggered (one event per physical press). */
     key_t key = keypad_read();
 
-    /* One line per key press: makes serial output and a logic-analyzer or
-       scope capture directly comparable. */
     switch (key) {
         case KEY_0:    Serial.println(F("Key Pressed: 0")); break;
         case KEY_1:    Serial.println(F("Key Pressed: 1")); break;

@@ -13,6 +13,10 @@ sleep     : ONLY the wake button (D2) wakes the chip. On wake the FSM goes
             straight back to the state it slept from and starts a fresh
             timeout window; no keypad press is needed.
 
+Clock note: milliseconds() counts Timer1 overflows and Timer1 is gated
+during power-down, so the clock simply pauses while asleep. That is why
+last_activity is re-stamped on wake; nothing else spans a sleep.
+
 User feedback: every state change calls a status hook so the user can see
 what the system just did. The hooks are implemented with the sketch, so
 this file needs no serial or LED code of its own.
@@ -39,20 +43,10 @@ static state_t prev_state;           /* state to return to after waking */
 static unsigned long locking_start;  /* used for checking for block */
 static unsigned long last_activity;  /* for the sleep timeout */
 
-/* Wall time spent asleep. The millisecond counter is driven by Timer1
- * overflows and Timer1 is gated during power-down, so it does not advance
- * while the chip is down. Duration comparisons add this back in. */
-static unsigned long sleep_offset = 0;
-
 static key_t new_code[PIN_LEN];      /* reprogram buffer */
 static unsigned int new_len = 0;
 
 static void announce(unsigned char event) { fsm_on_event(event); }
-
-/* Clock reading with the asleep time added back in. */
-static unsigned long now_ms(void) {
-  return milliseconds() + sleep_offset;
-}
 
 static void handle_locked(key_t key, unsigned long now) {
   (void)now;
@@ -142,21 +136,17 @@ static void handle_reprogram(key_t key, unsigned long now) {
 }
 
 static void handle_sleep(void) {
-  /* power_sleep() blocks until the wake button brings the chip back, so
-   * the time it takes to return is the time we were down. */
-  unsigned long before = milliseconds();
+  /* Blocks until the wake button brings the chip back. */
   power_sleep();
-  sleep_offset += milliseconds() - before;
 
   /* First conversion after re-enabling the ADC is a throwaway. */
   (void)adc_read_channel(KEYPAD_CHANNEL);
 
   /* The button is the only wake source, so returning from power_sleep()
    * IS the wake. Go straight back to the previous state and start a full
-   * timeout window -- waiting here for a keypad press is what used to
-   * send the chip straight back to sleep. */
+   * timeout window. */
   state = prev_state;
-  last_activity = now_ms();
+  last_activity = milliseconds();
   announce(FSM_EVT_WAKE);
 }
 
@@ -165,29 +155,27 @@ void fsm_init(void) {
   adc_init();
   current_init();
   locker_init();               /* load saved code from EEPROM */
-  power_init();                /* wake button on D2 */
+  power_init();                /* wake button on D2, servo supply on */
   setPosLock();  /* physically assert the locked position: the FSM starts
                     in STATE_LOCKED, and an uncommanded servo holds no torque */
-  sleep_offset = 0;
   last_activity = milliseconds();
   announce(FSM_EVT_BOOT);
 }
 
 void fsm_tick(key_t key) {
   tick_update();
-  unsigned long now = now_ms();
+  unsigned long now = milliseconds();
 
   /* global timeout rule: SLEEP_TIMEOUT_MS of no input -> sleep */
   if (key != KEY_NONE) {
     last_activity = now;
   } else if (state != STATE_SLEEP && state != STATE_LOCKING
              && now - last_activity >= SLEEP_TIMEOUT_MS) {
-    /* a half-typed new code doesn't survive the nap either */
     prev_state = (state == STATE_REPROGRAM) ? STATE_UNLOCKED : state;
     new_len = 0;
     locker_reset();            /* a half-typed code must not survive the nap */
     state = STATE_SLEEP;
-    /* the message goes out before power_sleep() stops the CPU */
+    /* the sketch flushes serial in this hook, before the USART is gated */
     announce(FSM_EVT_SLEEP_ENTERING);
   }
 
