@@ -14,8 +14,8 @@ extern "C" {
 #endif
 
 /* One-time bring-up: PWM, ADC, current sense, saved code from EEPROM,
- * wake button; physically asserts the locked position and starts the
- * sleep-timeout clock. Call exactly once (from setup()). */
+ * wake button, servo supply switch; asserts the locked position and
+ * starts the sleep-timeout clock. Call exactly once (from setup()). */
 void fsm_init(void);
 
 /* Runs one iteration of the main loop: services the millisecond tick
