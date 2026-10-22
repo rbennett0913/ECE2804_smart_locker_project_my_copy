@@ -13,11 +13,6 @@ sleep     : ONLY the wake button (D2) wakes the chip. On wake the FSM goes
             straight back to the state it slept from and starts a fresh
             timeout window; no keypad press is needed.
 
-Servo power: the servo's supply is switched off between moves. Every move
-is run through move_servo(), which powers the servo, holds it for the
-length of the travel, then cuts it again. That is what saves the servo's
-idle and holding current, which is larger than the whole MCU asleep.
-
 Clock note: milliseconds() counts Timer1 overflows and Timer1 is gated
 during power-down, so the clock simply pauses while asleep. That is why
 last_activity is re-stamped on wake; nothing else spans a sleep.
@@ -53,19 +48,8 @@ static unsigned int new_len = 0;
 
 static void announce(unsigned char event) { fsm_on_event(event); }
 
-/* Command a new position and power the servo for the move only.
- * Blocks for SERVO_MOVE_MS, then cuts the supply. */
-static void move_servo(unsigned char to_locked, unsigned long now) {
-  if (to_locked) {
-    setPosLock();
-  } else {
-    setPosUnlock();
-  }
-  locking_start = now;
-  servo_power_window(SERVO_MOVE_MS);
-}
-
 static void handle_locked(key_t key, unsigned long now) {
+  (void)now;
   if (key == KEY_NONE) {
     return;
   }
@@ -73,7 +57,7 @@ static void handle_locked(key_t key, unsigned long now) {
     switch (locker_check()) {
       case LOCKER_MATCH:
         fsm_on_password_result(1);
-        move_servo(0, now);          /* correct code: unlock */
+        setPosUnlock();
         state = STATE_UNLOCKED;
         break;
       case LOCKER_WRONG:
@@ -97,7 +81,8 @@ static void handle_locked(key_t key, unsigned long now) {
 
 static void handle_unlocked(key_t key, unsigned long now) {
   if (key == KEY_STAR) {
-    move_servo(1, now);            /* lock the door */
+    setPosLock();
+    locking_start = now;
     state = STATE_LOCKING;
   }
   else if (key == KEY_POUND) {
@@ -109,11 +94,9 @@ static void handle_unlocked(key_t key, unsigned long now) {
 
 static void handle_locking(key_t key, unsigned long now) {
   (void)key;
-  /* The move already happened inside move_servo(); just let the timeout
-   * elapse before deciding, so a blocked servo has had time to show it. */
   if (now - locking_start >= LOCK_TIMEOUT) {
     if (block_detected()) {
-      move_servo(0, now);          /* blocked: back to unlocked */
+      setPosUnlock();          /* door is blocked: abort and re-open */
       state = STATE_UNLOCKED;
       announce(FSM_EVT_BLOCKED_REVERT);
     } else {
@@ -172,12 +155,9 @@ void fsm_init(void) {
   adc_init();
   current_init();
   locker_init();               /* load saved code from EEPROM */
-  power_init();                /* wake button on D2, servo switch on D4 */
-  /* Assert the locked position for real: the servo starts unpowered, so
-   * this is what actually moves it to locked and leaves it there. */
-  setPosLock();
-  servo_power_window(SERVO_MOVE_MS);
-  locking_start = milliseconds();
+  power_init();                /* wake button on D2, servo supply on */
+  setPosLock();  /* physically assert the locked position: the FSM starts
+                    in STATE_LOCKED, and an uncommanded servo holds no torque */
   last_activity = milliseconds();
   announce(FSM_EVT_BOOT);
 }

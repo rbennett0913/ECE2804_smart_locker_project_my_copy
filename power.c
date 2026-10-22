@@ -11,7 +11,6 @@
 #define P_TIFR1   REG8(0x36)
 #define P_PCIFR   REG8(0x3B)
 #define P_SMCR    REG8(0x53)
-#define P_MCUCR   REG8(0x55)
 #define P_PCICR   REG8(0x68)
 #define P_PCMSK2  REG8(0x6D)   /* port D */
 #define P_TIMSK0  REG8(0x6E)
@@ -51,24 +50,10 @@
  * clean route is the extended fuse (efuse 0xFF) rather than this. */
 #define BOD_DISABLE_ON_SLEEP 0
 
-/* ---- servo supply switch (Option A: servo stays on 5 V) --------------
- *
- * 2N3906 PNP high side on the 5 V rail:
- *
- *       +5V --> emitter              collector --> servo VCC
- *               | 2N3906                  |
- *               |                      100nF to GND at the servo
- *               +-- base --+-- 10k -- +5V   (pull-up: fail-safe)
- *               |         |
- *               |       1k  --> D4 (PD4)
- *
- * LOW on the base turns the servo ON; HIGH turns it OFF.
- *
- * NOTE ON THE 9 V BATTERY: the servo must stay on 5 V. An SG90 is a
- * 4.8-6 V part, so switching the RAW 9 V rail would destroy it. The
- * regulator's ~250 mA limit is a sag problem, not a destruction problem,
- * and servo_power_window() below is the fix: the servo only draws while
- * it is actually moving. */
+/* ---- hardware cutoffs ------------------------------------------------ */
+
+/* Servo supply: a 2N3906 PNP high side, base driven from PD4 (D4).
+ * LOW on the base turns the servo ON; HIGH turns it OFF. */
 #define HW_SERVO_CUTOFF_ENABLE 1
 #define SERVO_CUTOFF_BIT      4        /* PD4 / D4 */
 
@@ -77,8 +62,7 @@
 #define HW_LOAD_CUTOFF_ENABLE 0
 #define LOAD_CUTOFF_BIT       5        /* PD5 / D5 */
 
-/* ---- wake button ------------------------------------------------------
- * Pushbutton from PD2 (D2) to GND, internal pull-up enabled. This is the
+/* ---- wake button ------------------------------------------------------\n * Pushbutton from PD2 (D2) to GND, internal pull-up enabled. This is the
  * ONLY wake source: the keypad no longer wakes the chip. */
 
 /* PCINT2 (port D) is interrupt vector 5. The handler is deliberately
@@ -110,14 +94,14 @@ void power_init(void)
     P_PCIFR = (1 << B_PCIF2);
 
 #if HW_SERVO_CUTOFF_ENABLE
-    /* D4 high = servo OFF. The FSM calls servo_power_window() at boot to
-     * give the servo power and turn it to the locked position. */
+    /* 2N3906 base as an output, LOW = servo supplied. The FSM commands
+     * the lock position right after this, so the servo needs its supply. */
     P_DDRD  |=  (1 << SERVO_CUTOFF_BIT);
-    P_PORTD |=  (1 << SERVO_CUTOFF_BIT);
+    P_PORTD &= ~(1 << SERVO_CUTOFF_BIT);
 #endif
 #if HW_LOAD_CUTOFF_ENABLE
     P_DDRD  |=  (1 << LOAD_CUTOFF_BIT);
-    P_PORTD |=  (1 << LOAD_CUTOFF_BIT);
+    P_PORTD &= ~(1 << LOAD_CUTOFF_BIT);
 #endif
 }
 
@@ -169,41 +153,6 @@ static void servo_signal_off(void)
 
     P_TCCR1A &= ~(1 << B_COM1A1);   /* OC1A no longer drives PB1 */
     P_PORTB  &= ~(1 << B_PB1);      /* hold the signal low */
-}
-
-static void servo_signal_on(void)
-{
-    P_TCCR1A |= (1 << B_COM1A1);    /* Timer1 drives the signal pin again */
-}
-
-/* ---------------------------------------------------------------------
- * Servo power window (the power saving)
- *
- * The servo only draws current while it is moving, so the supply is
- * switched on for the length of a move and then cut again. This replaces
- * leaving the servo powered for the whole session, which paid its holding
- * current the entire time and kept the motor humming against the latch.
- *
- * ORDER MATTERS in both directions:
- *   on  : signal first, then supply -- a servo that powers up with a valid
- *         signal goes straight to the commanded position instead of
- *         twitching to a default.
- *   off : supply last, after the signal has been parked low, so the servo
- *         cannot be left straining against a half-issued command.
- * ------------------------------------------------------------------- */
-void servo_power_window(unsigned int ms)
-{
-    unsigned long start = milliseconds();
-
-    servo_signal_on();
-    power_servo_supply(1);
-
-    while (milliseconds() - start < ms) {
-        tick_update();   /* the clock only advances here */
-    }
-
-    servo_signal_off();
-    power_servo_supply(0);
 }
 
 /* ---------------------------------------------------------------------
@@ -266,9 +215,10 @@ unsigned char power_sleep(void)
 
     P_ADCSRA |= (1 << B_ADEN);
 
-    /* The servo stays unpowered on wake: the FSM runs a power window when
-     * it next commands a move. */
-    servo_signal_off();
+    /* 6. Hand the pin back to Timer1, then switch the servo supply on, so
+     *    the servo sees a valid signal as it powers up. */
+    P_TCCR1A |= (1 << B_COM1A1);
+    power_servo_supply(1);
 
     return POWER_WAKE_KEY;
 }
