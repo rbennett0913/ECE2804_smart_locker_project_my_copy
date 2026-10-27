@@ -46,24 +46,48 @@
 #define B_PRSPI0   2
 #define B_PRTIM1   3
 
-/* Brown-out detector disable for the sleep window. See power.h: the
- * clean route is the extended fuse (efuse 0xFF) rather than this. */
+/* Brown-out detector disable for the sleep window. The clean route is
+ * the extended fuse (efuse 0xFF) rather than this. */
 #define BOD_DISABLE_ON_SLEEP 0
 
-/* ---- hardware cutoffs ------------------------------------------------ */
-
-/* Servo supply: a 2N3906 PNP high side, base driven from PD4 (D4).
- * LOW on the base turns the servo ON; HIGH turns it OFF. */
+/* ---- servo supply switch (low-side logic-level N-channel) -------------
+ *
+ * Currently a TP0606 in the servo's GROUND return:
+ *
+ *   servo GND --> D (drain)        (TP0606, TO-220: G / D / S)
+ *                 G (gate) <-- 1k <-- D4 (PD4)
+ *                 |              + 10k gate-to-GND (fail-safe, holds it
+ *                 |                off while the MCU is unpowered)
+ *                 S (source) --> board GND
+ *
+ * POLARITY IS INVERTED versus a P-channel high-side switch:
+ *   D4 HIGH -> gate above threshold -> servo supplied
+ *   D4 LOW  -> switch off           -> servo dead
+ *
+ * THE GROUND IS NOISY, and that is the accepted cost of this variant.
+ * The servo's ground no longer sits at board ground: it rides up by
+ * I_servo * Rds(on) on every current spike. With a logic-level part's on
+ * resistance the shift is small at normal current and larger at stall.
+ * The servo signal is referenced to board ground while the servo's own
+ * return is not, so a heavy current spike can disturb the signal. If the
+ * servo ever twitches or drops out under a stall, this is the first thing
+ * to suspect and the fix is a P-channel high-side switch instead.
+ *
+ * Swapping to a P-channel MOSFET on +5 V later needs only the two
+ * branches in power_servo_supply() reversed, plus the wiring above.
+ * ==================================================================== */
 #define HW_SERVO_CUTOFF_ENABLE 1
 #define SERVO_CUTOFF_BIT      4        /* PD4 / D4 */
 
-/* Whole 5 V load cutoff: PD5 (D5), same polarity. Leave this at 0 while
- * the MCU itself is on the switched rail, or it can't wake itself. */
+/* Whole 5 V load cutoff: PD5 (D5), same polarity as the servo switch.
+ * Leave at 0 while the MCU itself is on the switched rail, or it can't
+ * wake itself. */
 #define HW_LOAD_CUTOFF_ENABLE 0
 #define LOAD_CUTOFF_BIT       5        /* PD5 / D5 */
 
-/* ---- wake button ------------------------------------------------------\n * Pushbutton from PD2 (D2) to GND, internal pull-up enabled. This is the
- * ONLY wake source: the keypad no longer wakes the chip. */
+/* ---- wake button ------------------------------------------------------
+ * Pushbutton from PD2 (D2) to GND, internal pull-up enabled. This is the
+ * ONLY wake source: the keypad does not wake the chip. */
 
 /* PCINT2 (port D) is interrupt vector 5. The handler is deliberately
  * empty: the interrupt exists only to wake the CPU. It must be defined,
@@ -94,32 +118,31 @@ void power_init(void)
     P_PCIFR = (1 << B_PCIF2);
 
 #if HW_SERVO_CUTOFF_ENABLE
-    /* 2N3906 base as an output, LOW = servo supplied. The FSM commands
-     * the lock position right after this, so the servo needs its supply. */
+    /* D4 HIGH = servo supplied. The FSM commands the lock position right
+     * after this, so the servo needs its switch closed at boot. */
     P_DDRD  |=  (1 << SERVO_CUTOFF_BIT);
-    P_PORTD &= ~(1 << SERVO_CUTOFF_BIT);
+    P_PORTD |=  (1 << SERVO_CUTOFF_BIT);
 #endif
 #if HW_LOAD_CUTOFF_ENABLE
     P_DDRD  |=  (1 << LOAD_CUTOFF_BIT);
-    P_PORTD &= ~(1 << LOAD_CUTOFF_BIT);
+    P_PORTD |=  (1 << LOAD_CUTOFF_BIT);
 #endif
 }
 
 /* ---------------------------------------------------------------------
  * Hardware cutoffs
  *
- * 2N3906 PNP high side: emitter to +5 V, collector to the load, base to
- * the pin through 1 k, with a 10 k from base to emitter. Pull the base
- * LOW to deliver current; the pull-up keeps the load off whenever the
- * MCU is unpowered or in reset.
- * ------------------------------------------------------------------- */
+ * Low-side N-channel: drain to the load's ground, source to board GND,
+ * gate driven from the pin. HIGH closes the switch and supplies the load;
+ * the 10k gate-to-GND pull-down holds it open whenever the MCU has no
+ * defined output. */
 void power_servo_supply(unsigned char on)
 {
 #if HW_SERVO_CUTOFF_ENABLE
     if (on) {
-        P_PORTD &= ~(1 << SERVO_CUTOFF_BIT);   /* base low  -> servo on  */
+        P_PORTD |=  (1 << SERVO_CUTOFF_BIT);   /* gate high -> servo on  */
     } else {
-        P_PORTD |=  (1 << SERVO_CUTOFF_BIT);   /* base high -> servo off */
+        P_PORTD &= ~(1 << SERVO_CUTOFF_BIT);   /* gate low  -> servo off */
     }
 #else
     (void)on;
@@ -130,9 +153,9 @@ void power_load_supply(unsigned char on)
 {
 #if HW_LOAD_CUTOFF_ENABLE
     if (on) {
-        P_PORTD &= ~(1 << LOAD_CUTOFF_BIT);
-    } else {
         P_PORTD |=  (1 << LOAD_CUTOFF_BIT);
+    } else {
+        P_PORTD &= ~(1 << LOAD_CUTOFF_BIT);
     }
 #else
     (void)on;
@@ -164,7 +187,7 @@ unsigned char power_sleep(void)
     unsigned char saved_timsk0 = P_TIMSK0;
     unsigned char saved_prr    = P_PRR;
 
-    /* 1. Servo: stop commanding it, then cut its supply. */
+    /* 1. Servo: stop commanding it, then open its switch. */
     servo_signal_off();
     power_servo_supply(0);
 
@@ -215,8 +238,8 @@ unsigned char power_sleep(void)
 
     P_ADCSRA |= (1 << B_ADEN);
 
-    /* 6. Hand the pin back to Timer1, then switch the servo supply on, so
-     *    the servo sees a valid signal as it powers up. */
+    /* 6. Hand the pin back to Timer1, then close the servo switch, so the
+     *    servo sees a valid signal as it powers up. */
     P_TCCR1A |= (1 << B_COM1A1);
     power_servo_supply(1);
 

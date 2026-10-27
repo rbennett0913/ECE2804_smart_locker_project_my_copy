@@ -13,6 +13,11 @@ sleep     : ONLY the wake button (D2) wakes the chip. On wake the FSM goes
             straight back to the state it slept from and starts a fresh
             timeout window; no keypad press is needed.
 
+Servo switch: power_servo_supply() is driven LOW-SIDE, so D4 HIGH means
+servo supplied and D4 LOW means off. The FSM does not touch that polarity
+itself -- it only calls the function -- so switching back to a P-channel
+high-side part is a change in power.c alone.
+
 Clock note: milliseconds() counts Timer1 overflows and Timer1 is gated
 during power-down, so the clock simply pauses while asleep. That is why
 last_activity is re-stamped on wake; nothing else spans a sleep.
@@ -155,7 +160,7 @@ void fsm_init(void) {
   adc_init();
   current_init();
   locker_init();               /* load saved code from EEPROM */
-  power_init();                /* wake button on D2, servo supply on */
+  power_init();                /* wake button on D2, servo switch on D4 */
   setPosLock();  /* physically assert the locked position: the FSM starts
                     in STATE_LOCKED, and an uncommanded servo holds no torque */
   last_activity = milliseconds();
