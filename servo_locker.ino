@@ -2,13 +2,15 @@
  *
  * The Arduino core supplies main(), which calls setup() once and then
  * calls loop() forever. All real work lives in the C modules (fsm.c,
- * pwm.c, keypad.c, locker.c, power.c); this file is the glue, and it also
- * owns every serial message the user sees.
+ * pwm.c, keypad.c, locker.c, power.c, ui.c); this file is the glue, and
+ * it also owns every serial message the user sees.
  *
  * Wiring:
  *   keypad (resistor ladder) -> A0  (ADC0 / PC0, see KEYPAD_CHANNEL)
  *   servo signal             -> D9  (OC1A / PB1)
- *   servo supply switch      -> D4  (2N3906 base, LOW = servo on)
+ *   servo supply switch      -> D4  (TP0606 low side, HIGH = servo on)
+ *   state LEDs               -> D6 red, D7 yellow, D8 green (1k to GND)
+ *   passive piezo buzzer     -> D3  (OC2B)
  *   wake button              -> D2  (to GND, internal pull-up)
  *   servo current shunt      -> A1  (not fitted yet; detection disabled)
  */
@@ -16,6 +18,7 @@
 #include "fsm.h"
 #include "keypad.h"
 #include "current.h"
+#include "ui.h"
 
 /* Uncomment to print the raw keypad ADC reading twice a second, for
    checking it against the thresholds in keypad.h. */
@@ -27,9 +30,11 @@
 void fsm_on_digit(unsigned char digit) {
     (void)digit;
     Serial.print('*');
+    ui_digit();
 }
 
 void fsm_on_password_result(unsigned char ok) {
+    ui_result(ok);
     if (ok) {
         Serial.println(F("\r\nACCESS GRANTED - unlocked. '*' locks, '#' sets a new code."));
     } else {
@@ -38,6 +43,7 @@ void fsm_on_password_result(unsigned char ok) {
 }
 
 void fsm_on_event(unsigned char event) {
+    ui_event(event);
     switch (event) {
         case FSM_EVT_BOOT:
             Serial.println(F("\r\n=== Personal Smart Locker ==="));
@@ -80,6 +86,9 @@ void fsm_on_event(unsigned char event) {
 void setup() {
     /* Serial first, so fsm_init()'s boot message has somewhere to go. */
     Serial.begin(9600);
+    /* LEDs and buzzer before fsm_init(): it raises FSM_EVT_BOOT, which the
+       UI displays. */
+    ui_init();
     fsm_init();
 
     /* Boot banner: proves the MCU is running and the serial link works.
@@ -120,4 +129,8 @@ void loop() {
     }
 
     fsm_tick(key);
+
+    /* Advance sounds and LED flashes, after fsm_tick() so an event raised
+       this pass is shown immediately. */
+    ui_tick();
 }
