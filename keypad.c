@@ -1,5 +1,4 @@
 #include "keypad.h"
-#include "pwm.h"      /* milliseconds(), for the debounce hold-off */
 
 /* Configure the ADC for single-conversion (polled) mode: the ADC sits
  * idle until adc_read() explicitly starts a conversion. The caller
@@ -16,7 +15,7 @@
 void adc_init(void)
 {
     ADMUX  = (1 << REFS0) | KEYPAD_CHANNEL; /* reference to supply voltage
-                                            since resistor ladder is tied 
+                                            since resistor ladder is tied
                                             to Vcc. Use PC0/A0 by default */
 
     /* no ADATE: the ADC only converts when adc_read() asks it to */
@@ -28,8 +27,9 @@ void adc_init(void)
      * result should be discarded */
     (void)adc_read();
 
-    /* disable the digital input buffer on the analog pin: saves power
-     * and keeps digital logic from reacting to the analog levels */
+    /* disable the digital input buffer on A0: nothing reads it digitally
+     * any more (wake is a button on D2), and leaving it on wastes current
+     * at the ladder's mid-rail voltages. */
     DIDR0 |= (1 << ADC0D);
 }
 
@@ -85,39 +85,79 @@ static const key_range_t keymap[] = {
     { pound_l, pound_h, KEY_POUND },
 };
 
-/* Debounced key events.
+/* ---------------------------------------------------------------------
+ * Key agreement + press/release debounce
  *
- * The main loop polls much faster (~150 us) than a human can press, so
- * a raw held key would be reported hundreds of times per press. Report
- * a key only on the iteration where it first appears (rising edge),
- * then hold off for DEBOUNCE_MS to skip contact bounce. A press-and-
- * hold is exactly one event. */
-#define DEBOUNCE_MS 50UL
+ * The old version accepted a key the first time a reading landed in its
+ * range, which caused two faults:
+ *
+ *   1. As a key is pressed or released, the A0 voltage sweeps through
+ *      other keys' ranges. A single reading taken mid-sweep can match the
+ *      wrong key, and it used to be accepted immediately.
+ *   2. On release the contact bounces, flickering between no-key and the
+ *      key. The old 50 ms hold-off was short enough that a bounce often
+ *      counted as a second press.
+ *
+ * Now a key must read the SAME on STABLE_READS consecutive polls before
+ * it counts (so a mid-sweep reading cannot get through), and the pad must
+ * read idle for IDLE_READS polls after that press before another can
+ * count (so bounce cannot produce a double).
+ *
+ * Counts are polls, not milliseconds, so the 20 ms clock step does not
+ * affect them. At roughly 0.1-0.15 ms per poll this is about 25 ms of
+ * stable agreement and 50 ms of required idle. If doubles still appear,
+ * raise IDLE_READS; if fast taps get missed, lower STABLE_READS.
+ * ------------------------------------------------------------------- */
+#define STABLE_READS 200u
+#define IDLE_READS   400u
 
-static key_t prev_raw = KEY_NONE;
-/* Boot happened "DEBOUNCE_MS ago", so the first real press is not
- * swallowed by the hold-off. Unsigned wraparound makes this safe. */
-static unsigned long last_edge_ms = 0UL - DEBOUNCE_MS;
+static key_t        cand = KEY_NONE;
+static unsigned int cand_count = 0;
+static unsigned int idle_count = IDLE_READS;
+static unsigned char armed = 1;
 
-key_t keypad_read() {
+static key_t decode(unsigned int adc)
+{
     unsigned char i;
-    unsigned int adc = adc_read_channel(KEYPAD_CHANNEL); /* one consistent snapshot */
-    key_t raw = KEY_NONE;
-
     for (i = 0; i < sizeof keymap / sizeof keymap[0]; ++i) {
         if (adc >= keymap[i].lo && adc <= keymap[i].hi) {
-            raw = keymap[i].key;
-            break;
+            return keymap[i].key;
         }
     }
+    return KEY_NONE;
+}
 
-    if (raw != KEY_NONE && prev_raw == KEY_NONE
-        && (milliseconds() - last_edge_ms) >= DEBOUNCE_MS) {
-        prev_raw = raw;
-        last_edge_ms = milliseconds();
-        return raw;                   /* rising edge: one event per press */
+key_t keypad_read(void)
+{
+    key_t raw = decode(adc_read_channel(KEYPAD_CHANNEL));
+
+    if (raw == KEY_NONE) {
+        if (idle_count < IDLE_READS) {
+            idle_count++;
+        }
+        if (idle_count >= IDLE_READS) {
+            armed = 1;                 /* fully released: ready again */
+        }
+        cand = KEY_NONE;
+        cand_count = 0;
+        return KEY_NONE;
     }
 
-    prev_raw = raw;
-    return KEY_NONE;
+    idle_count = 0;                    /* any key resets the idle count */
+    if (!armed) {
+        return KEY_NONE;               /* still the same press */
+    }
+
+    if (raw != cand) {                 /* value still moving: restart */
+        cand = raw;
+        cand_count = 1;
+        return KEY_NONE;
+    }
+
+    if (++cand_count < STABLE_READS) {
+        return KEY_NONE;
+    }
+
+    armed = 0;                         /* one event per press */
+    return raw;
 }
