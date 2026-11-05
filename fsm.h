@@ -3,9 +3,9 @@
 
 #include "keypad.h"   /* key_t */
 
-/* ms to let the servo finish its move before the block check. An SG90
- * takes ~0.3 s for the full lock/unlock swing; 600 ms leaves margin and
- * still answers well inside the spec's 1 s blocked-motor deadline. */
+/* ms to let the servo finish its move before the block verdict is acted
+ * on. An SG90 takes ~0.3 s for the full swing; this leaves margin and
+ * still answers inside the spec's 1 s blocked-motor deadline. */
 #define LOCK_TIMEOUT      600UL
 #define SLEEP_TIMEOUT_MS  15000UL   /* ms of no key presses before power-down */
 
@@ -45,10 +45,11 @@ void fsm_on_password_result(unsigned char ok);
 #define FSM_EVT_WAKE              2   /* wake button pressed, back awake */
 #define FSM_EVT_LOCKED            3   /* servo finished moving to locked */
 #define FSM_EVT_BLOCKED_REVERT    4   /* motor blocked: went back to unlocked */
-#define FSM_EVT_REPROGRAM_START   5   /* entering new-code mode */
-#define FSM_EVT_CODE_SAVED        6   /* new code written to EEPROM */
-#define FSM_EVT_REPROGRAM_CANCEL  7   /* new-code entry abandoned */
-#define FSM_EVT_ENTRY_INCOMPLETE  8   /* '#' with fewer than PIN_LEN digits */
+#define FSM_EVT_MOTOR_MOVED       5   /* servo began a lock/unlock move */
+#define FSM_EVT_REPROGRAM_START   6   /* entering new-code mode */
+#define FSM_EVT_CODE_SAVED        7   /* new code written to EEPROM */
+#define FSM_EVT_REPROGRAM_CANCEL  8   /* new-code entry abandoned */
+#define FSM_EVT_ENTRY_INCOMPLETE  9   /* '#' with fewer than PIN_LEN digits */
 
 #ifdef __cplusplus
 }

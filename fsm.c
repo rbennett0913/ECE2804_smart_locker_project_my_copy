@@ -4,7 +4,8 @@ states: locked | unlocked | locking | reprogram | sleep
 locked    : digits fill the attempt buffer; '#' checks it
             correct -> unlocked, wrong -> stay locked
 unlocked  : '*' -> locking, '#' -> reprogram
-locking   : after LOCK_TIMEOUT: block detected -> unlocked, else -> locked
+locking   : the move runs while block_watch polls the shunt:
+            sustained high -> unlocked, otherwise -> locked
 reprogram : digits fill the new-code buffer
             '#' with exactly 4 digits -> save to EEPROM -> unlocked
             '*' -> cancel -> unlocked
@@ -12,6 +13,13 @@ any state : SLEEP_TIMEOUT_MS with no key -> sleep (power-down)
 sleep     : ONLY the wake button (D2) wakes the chip. On wake the FSM goes
             straight back to the state it slept from and starts a fresh
             timeout window; no keypad press is needed.
+
+Block detection: the watch is opened when the move starts and sampled once
+every BLOCK_SAMPLE_PERIOD_MS from fsm_tick(), so the reading is spread
+through the whole move instead of depending on when the timeout happens to
+expire. A verdict is only given once BLOCK_CONFIRM_SAMPLES samples in a row
+have read high, which is what separates a real stall from the inrush spike
+at the start of every move.
 
 Servo switch: power_servo_supply() is driven LOW-SIDE, so D4 HIGH means
 servo supplied and D4 LOW means off. The FSM does not touch that polarity
@@ -45,16 +53,30 @@ typedef enum {
 static state_t state = STATE_LOCKED;
 static state_t prev_state;           /* state to return to after waking */
 
-static unsigned long locking_start;  /* used for checking for block */
+static unsigned long locking_start;  /* when the current move began */
 static unsigned long last_activity;  /* for the sleep timeout */
+static unsigned long last_sample;    /* when the watch last took a sample */
+static unsigned char watch_done;     /* the current watch has a verdict */
 
 static key_t new_code[PIN_LEN];      /* reprogram buffer */
 static unsigned int new_len = 0;
 
 static void announce(unsigned char event) { fsm_on_event(event); }
 
+/* Command a position and open a block watch over the move. */
+static void start_move(unsigned char to_locked, unsigned long now) {
+  if (to_locked) {
+    setPosLock();
+  } else {
+    setPosUnlock();
+  }
+  locking_start = now;
+  last_sample = now;
+  watch_done = 0;
+  block_watch_begin();
+}
+
 static void handle_locked(key_t key, unsigned long now) {
-  (void)now;
   if (key == KEY_NONE) {
     return;
   }
@@ -62,7 +84,7 @@ static void handle_locked(key_t key, unsigned long now) {
     switch (locker_check()) {
       case LOCKER_MATCH:
         fsm_on_password_result(1);
-        setPosUnlock();
+        start_move(0, now);          /* correct code: unlock */
         state = STATE_UNLOCKED;
         break;
       case LOCKER_WRONG:
@@ -86,8 +108,7 @@ static void handle_locked(key_t key, unsigned long now) {
 
 static void handle_unlocked(key_t key, unsigned long now) {
   if (key == KEY_STAR) {
-    setPosLock();
-    locking_start = now;
+    start_move(1, now);            /* lock the door */
     state = STATE_LOCKING;
   }
   else if (key == KEY_POUND) {
@@ -97,11 +118,25 @@ static void handle_unlocked(key_t key, unsigned long now) {
   }
 }
 
+/* The move is already running; this state exists to watch it. Samples are
+ * taken on a fixed spacing so the readings land all over the servo's PWM
+ * cycle, and the verdict comes from how many of them in a row read high. */
 static void handle_locking(key_t key, unsigned long now) {
   (void)key;
-  if (now - locking_start >= LOCK_TIMEOUT) {
-    if (block_detected()) {
-      setPosUnlock();          /* door is blocked: abort and re-open */
+
+  if (!watch_done && (now - last_sample) >= BLOCK_SAMPLE_PERIOD_MS) {
+    last_sample = now;
+    if (block_watch_poll()) {
+      watch_done = 1;
+    }
+  }
+
+  if (watch_done && (now - locking_start) >= LOCK_TIMEOUT) {
+    if (block_watch_blocked()) {
+      /* Blocked: go back to unlocked. No watch on this move -- the servo
+         has already failed to reach the position, so there is nothing
+         left to strain against. */
+      setPosUnlock();
       state = STATE_UNLOCKED;
       announce(FSM_EVT_BLOCKED_REVERT);
     } else {
@@ -163,6 +198,7 @@ void fsm_init(void) {
   power_init();                /* wake button on D2, servo switch on D4 */
   setPosLock();  /* physically assert the locked position: the FSM starts
                     in STATE_LOCKED, and an uncommanded servo holds no torque */
+  locking_start = milliseconds();
   last_activity = milliseconds();
   announce(FSM_EVT_BOOT);
 }
