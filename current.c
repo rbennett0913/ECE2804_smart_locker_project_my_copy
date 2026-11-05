@@ -9,8 +9,8 @@ void current_init(void)
 #endif
 }
 
-/* The servo draws current in pulses, not a steady level, so a single
- * sample can land anywhere between idle and peak. Average a burst. */
+/* The servo draws current in pulses, not a steady level, so a single sample
+ * can land anywhere between idle and peak. Average a burst. */
 unsigned int current_read_raw(void)
 {
     unsigned long sum = 0;
@@ -33,21 +33,21 @@ unsigned int current_read_mv(void)
  *
  * A single high reading cannot tell a stall from a normal move:
  *
- *   - every move starts with an inrush spike, which is also a high
- *     current, so a check taken during travel reports a block on a
- *     healthy servo
- *   - the travelling and stalled readings overlap from motor to motor,
- *     so no one threshold separates them
+ *   - every move starts with an inrush spike, which is also a high current,
+ *     so a check taken during travel reports a block on a healthy servo
+ *   - the travelling and stalled readings overlap from motor to motor, so no
+ *     one threshold separates them
  *
- * What does separate them is how long the high reading lasts. Inrush
- * decays within tens of milliseconds. A stalled motor keeps drawing for as
- * long as it is pushed against the load. So the watch samples through the
- * whole move and only calls it blocked when the high reading has held for
+ * What does separate them is how long the high reading lasts. Inrush decays
+ * within tens of milliseconds. A stalled motor keeps drawing for as long as
+ * it is pushed against the load. So the watch samples through the whole move
+ * and only calls it blocked when the high reading has held for
  * BLOCK_CONFIRM_SAMPLES consecutive samples, and never before
- * BLOCK_MIN_SAMPLES have been taken.
+ * BLOCK_MIN_SAMPLES have been taken. A single spike can never produce a
+ * verdict, which is the fault the old single-check version had.
  *
- * The FSM spaces the polls out, so each sample lands in a different part
- * of the servo's 20 ms PWM cycle instead of all of them inside one pulse.
+ * The FSM spaces the polls out, so each sample lands in a different part of
+ * the servo's 20 ms PWM cycle instead of all of them inside one pulse.
  * ------------------------------------------------------------------- */
 static unsigned samples_taken;   /* since block_watch_begin() */
 static unsigned samples_high;    /* consecutive over-threshold samples */
@@ -58,6 +58,15 @@ void block_watch_begin(void)
     samples_taken = 0;
     samples_high = 0;
     verdict = 0;
+}
+
+unsigned char block_watch_running(void)
+{
+#if BLOCK_DETECT_ENABLE
+    return (samples_taken < BLOCK_MIN_SAMPLES);
+#else
+    return 0;    /* detection off: the FSM ignores the watch entirely */
+#endif
 }
 
 unsigned char block_watch_poll(void)
@@ -72,26 +81,36 @@ unsigned char block_watch_poll(void)
         samples_high = 0;          /* a normal reading breaks the run */
     }
 
-    /* Verdict only once the move has had time to finish, and only if the
+    /* A verdict is available once the move has been sampled enough and the
      * high reading held all the way through. */
     if (samples_taken >= BLOCK_MIN_SAMPLES
         && samples_high >= BLOCK_CONFIRM_SAMPLES) {
         verdict = 1;
     }
-#endif
 
     return (samples_taken >= BLOCK_MIN_SAMPLES);
+#else
+    return 1;
+#endif
 }
 
 unsigned char block_watch_blocked(void)
 {
+#if BLOCK_DETECT_ENABLE
     return verdict;
+#else
+    return 0;
+#endif
 }
 
 unsigned char block_detected(void)
 {
+#if BLOCK_DETECT_ENABLE
     if (samples_taken < BLOCK_MIN_SAMPLES) {
         return 0;                  /* no verdict yet */
     }
     return block_watch_blocked();
+#else
+    return 0;
+#endif
 }

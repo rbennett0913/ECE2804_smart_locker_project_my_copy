@@ -4,8 +4,9 @@ states: locked | unlocked | locking | reprogram | sleep
 locked    : digits fill the attempt buffer; '#' checks it
             correct -> unlocked, wrong -> stay locked
 unlocked  : '*' -> locking, '#' -> reprogram
-locking   : the move runs while block_watch polls the shunt:
-            sustained high -> unlocked, otherwise -> locked
+locking   : LOCK_TIMEOUT after the move started decides the outcome.
+            If the block watch produced a verdict it is used; otherwise the
+            move is treated as good and the door locks.
 reprogram : digits fill the new-code buffer
             '#' with exactly 4 digits -> save to EEPROM -> unlocked
             '*' -> cancel -> unlocked
@@ -14,12 +15,19 @@ sleep     : ONLY the wake button (D2) wakes the chip. On wake the FSM goes
             straight back to the state it slept from and starts a fresh
             timeout window; no keypad press is needed.
 
+IMPORTANT: the lock decision is gated by the timeout ALONE. The block watch
+adds a verdict when it has one, but a watch that never completes (detection
+switched off, or a sample missed) can only ever fail to report a block -- it
+can never stop the door from locking. An earlier version required the watch
+to finish before deciding, which left the FSM stuck in STATE_LOCKING
+whenever detection was disabled.
+
 Block detection: the watch is opened when the move starts and sampled once
-every BLOCK_SAMPLE_PERIOD_MS from fsm_tick(), so the reading is spread
-through the whole move instead of depending on when the timeout happens to
-expire. A verdict is only given once BLOCK_CONFIRM_SAMPLES samples in a row
-have read high, which is what separates a real stall from the inrush spike
-at the start of every move.
+every BLOCK_SAMPLE_PERIOD_MS from fsm_tick(), so the readings spread through
+the whole move instead of depending on when the timeout happens to expire.
+A verdict is only given once BLOCK_CONFIRM_SAMPLES samples in a row have read
+high, which is what separates a real stall from the inrush spike at the start
+of every move.
 
 Servo switch: power_servo_supply() is driven LOW-SIDE, so D4 HIGH means
 servo supplied and D4 LOW means off. The FSM does not touch that polarity
@@ -56,7 +64,6 @@ static state_t prev_state;           /* state to return to after waking */
 static unsigned long locking_start;  /* when the current move began */
 static unsigned long last_activity;  /* for the sleep timeout */
 static unsigned long last_sample;    /* when the watch last took a sample */
-static unsigned char watch_done;     /* the current watch has a verdict */
 
 static key_t new_code[PIN_LEN];      /* reprogram buffer */
 static unsigned int new_len = 0;
@@ -72,7 +79,6 @@ static void start_move(unsigned char to_locked, unsigned long now) {
   }
   locking_start = now;
   last_sample = now;
-  watch_done = 0;
   block_watch_begin();
 }
 
@@ -118,31 +124,36 @@ static void handle_unlocked(key_t key, unsigned long now) {
   }
 }
 
-/* The move is already running; this state exists to watch it. Samples are
- * taken on a fixed spacing so the readings land all over the servo's PWM
- * cycle, and the verdict comes from how many of them in a row read high. */
+/* The move is already running; this state watches it and then decides.
+ * The timeout is the only gate: the watch adds information when it has
+ * some, and is ignored when it does not. */
 static void handle_locking(key_t key, unsigned long now) {
   (void)key;
 
-  if (!watch_done && (now - last_sample) >= BLOCK_SAMPLE_PERIOD_MS) {
+  /* Sample on a fixed spacing so the readings land in different parts of
+   * the servo's PWM cycle. Skipped once the watch has stopped, which is
+   * either detection being off or a verdict already reached. */
+  if (block_watch_running() && (now - last_sample) >= BLOCK_SAMPLE_PERIOD_MS) {
     last_sample = now;
-    if (block_watch_poll()) {
-      watch_done = 1;
-    }
+    (void)block_watch_poll();
   }
 
-  if (watch_done && (now - locking_start) >= LOCK_TIMEOUT) {
-    if (block_watch_blocked()) {
-      /* Blocked: go back to unlocked. No watch on this move -- the servo
-         has already failed to reach the position, so there is nothing
-         left to strain against. */
-      setPosUnlock();
-      state = STATE_UNLOCKED;
-      announce(FSM_EVT_BLOCKED_REVERT);
-    } else {
-      state = STATE_LOCKED;
-      announce(FSM_EVT_LOCKED);
-    }
+  if ((now - locking_start) < LOCK_TIMEOUT) {
+    return;                        /* still within the move */
+  }
+
+  /* Timeout reached. Honour a verdict if there is one; otherwise treat the
+     move as good, which also covers detection being switched off. */
+  if (block_watch_blocked()) {
+    /* Blocked: go back to unlocked. No watch on this move -- the servo has
+       already failed to reach the position, so there is nothing left to
+       strain against. */
+    setPosUnlock();
+    state = STATE_UNLOCKED;
+    announce(FSM_EVT_BLOCKED_REVERT);
+  } else {
+    state = STATE_LOCKED;
+    announce(FSM_EVT_LOCKED);
   }
 }
 
