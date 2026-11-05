@@ -13,9 +13,9 @@
 extern "C" {
 #endif
 
-/* One-time bring-up: PWM, ADC, current sense, saved code from EEPROM,
- * wake button, servo supply switch; asserts the locked position and
- * starts the sleep-timeout clock. Call exactly once (from setup()). */
+/* One-time bring-up: PWM, ADC, current sense, battery monitor, saved code
+ * from EEPROM, wake button, servo supply switch; asserts the locked
+ * position and starts the sleep-timeout clock. Call once (from setup()). */
 void fsm_init(void);
 
 /* Runs one iteration of the main loop: services the millisecond tick
@@ -50,6 +50,7 @@ void fsm_on_password_result(unsigned char ok);
 #define FSM_EVT_CODE_SAVED        7   /* new code written to EEPROM */
 #define FSM_EVT_REPROGRAM_CANCEL  8   /* new-code entry abandoned */
 #define FSM_EVT_ENTRY_INCOMPLETE  9   /* '#' with fewer than PIN_LEN digits */
+#define FSM_EVT_BATTERY_LOW      10   /* battery below threshold on this wake */
 
 #ifdef __cplusplus
 }

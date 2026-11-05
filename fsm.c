@@ -29,6 +29,13 @@ A verdict is only given once BLOCK_CONFIRM_SAMPLES samples in a row have read
 high, which is what separates a real stall from the inrush spike at the start
 of every move.
 
+Battery monitor: the cell is read once per boot or wake, BATTERY_CHECK_DELAY_MS
+after the system starts, so the servo's inrush has passed and the divider's
+cap has settled. That is one 16-sample burst per wake, not continuous
+monitoring. Skipped while STATE_LOCKING so a mid-move sag cannot raise a
+false alert. The low-battery result is reported as FSM_EVT_BATTERY_LOW and
+displayed by the sketch, exactly like every other event.
+
 Servo switch: power_servo_supply() is driven LOW-SIDE, so D4 HIGH means
 servo supplied and D4 LOW means off. The FSM does not touch that polarity
 itself -- it only calls the function -- so switching back to a P-channel
@@ -48,6 +55,7 @@ this file needs no serial or LED code of its own.
 #include "keypad.h"
 #include "locker.h"
 #include "current.h"
+#include "battery.h"
 #include "power.h"
 
 typedef enum {
@@ -65,10 +73,20 @@ static unsigned long locking_start;  /* when the current move began */
 static unsigned long last_activity;  /* for the sleep timeout */
 static unsigned long last_sample;    /* when the watch last took a sample */
 
+/* Battery check: armed on boot and on every wake, then runs once. */
+static unsigned char batt_pending;
+static unsigned long batt_due_from;
+
 static key_t new_code[PIN_LEN];      /* reprogram buffer */
 static unsigned int new_len = 0;
 
 static void announce(unsigned char event) { fsm_on_event(event); }
+
+/* Ask for one battery reading, BATTERY_CHECK_DELAY_MS from `now`. */
+static void battery_schedule(unsigned long now) {
+  batt_pending = 1;
+  batt_due_from = now;
+}
 
 /* Command a position and open a block watch over the move. */
 static void start_move(unsigned char to_locked, unsigned long now) {
@@ -198,6 +216,11 @@ static void handle_sleep(void) {
    * timeout window. */
   state = prev_state;
   last_activity = milliseconds();
+
+  /* The cell is worth re-checking on every wake: it is the moment the user
+   * is present, and it costs one short burst. */
+  battery_schedule(last_activity);
+
   announce(FSM_EVT_WAKE);
 }
 
@@ -205,18 +228,30 @@ void fsm_init(void) {
   pwm_init();
   adc_init();
   current_init();
+  battery_init();              /* cell monitor on A2 */
   locker_init();               /* load saved code from EEPROM */
   power_init();                /* wake button on D2, servo switch on D4 */
   setPosLock();  /* physically assert the locked position: the FSM starts
                     in STATE_LOCKED, and an uncommanded servo holds no torque */
   locking_start = milliseconds();
   last_activity = milliseconds();
+  battery_schedule(last_activity);   /* first check after the delay */
   announce(FSM_EVT_BOOT);
 }
 
 void fsm_tick(key_t key) {
   tick_update();
   unsigned long now = milliseconds();
+
+  /* One battery reading per boot/wake, after the delay, and never while the
+   * servo is moving -- its inrush would pull the reading down. */
+  if (batt_pending && state != STATE_LOCKING
+      && (now - batt_due_from) >= BATTERY_CHECK_DELAY_MS) {
+    batt_pending = 0;
+    if (battery_low()) {
+      announce(FSM_EVT_BATTERY_LOW);
+    }
+  }
 
   /* global timeout rule: SLEEP_TIMEOUT_MS of no input -> sleep */
   if (key != KEY_NONE) {
