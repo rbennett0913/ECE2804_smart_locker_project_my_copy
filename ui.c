@@ -52,6 +52,9 @@ static const note_t S_SAVED[]    = { {TONE_HI,  80}, {TONE_REST, 60}, {TONE_HI, 
 static const note_t S_BLOCKED[]  = { {TONE_LO,  160}, {TONE_REST, 100}, {TONE_LO, 160},
                                      {TONE_REST, 100}, {TONE_LO, 160} };
 static const note_t S_WAKE[]     = { {TONE_MID, 60} };
+static const note_t S_BATT[]     = { {TONE_HI, 100}, {TONE_REST, 80},
+                                     {TONE_MID, 100}, {TONE_REST, 80},
+                                     {TONE_LO, 200} };
 
 /* ---- sequence player ---- */
 static const note_t *seq;            /* 0 when idle            */
@@ -230,6 +233,13 @@ void ui_event(unsigned char e)
         case FSM_EVT_ENTRY_INCOMPLETE:
             flash(LED_Y, 2);
             PLAY(S_SHORT_LO);
+            break;
+
+        case FSM_EVT_BATTERY_LOW:
+            /* Red and yellow together: a pattern no other event uses.
+             * Returns to the current state's LED when the flash ends. */
+            flash(LED_R | LED_Y, 3);
+            PLAY(S_BATT);
             break;
 
         default:

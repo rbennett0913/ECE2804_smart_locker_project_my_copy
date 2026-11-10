@@ -2,17 +2,19 @@
  *
  * The Arduino core supplies main(), which calls setup() once and then
  * calls loop() forever. All real work lives in the C modules (fsm.c,
- * pwm.c, keypad.c, locker.c, power.c, ui.c); this file is the glue, and
- * it also owns every serial message the user sees.
+ * pwm.c, keypad.c, locker.c, power.c, ui.c, battery.c); this file is the
+ * glue, and it also owns every serial message the user sees.
  *
  * Wiring:
  *   keypad (resistor ladder) -> A0  (ADC0 / PC0, see KEYPAD_CHANNEL)
+ *   servo current shunt      -> A1  (ADC1 / PC1)
+ *   battery divider          -> A2  (1M battery+ to A2, 1M A2 to GND,
+ *                                    100 nF A2 to GND)
  *   servo signal             -> D9  (OC1A / PB1)
  *   servo supply switch      -> D4  (TP0606 low side, HIGH = servo on)
  *   state LEDs               -> D6 red, D7 yellow, D8 green (1k to GND)
  *   passive piezo buzzer     -> D3  (OC2B)
  *   wake button              -> D2  (to GND, internal pull-up)
- *   servo current shunt      -> A1  (not fitted yet; detection disabled)
  */
 
 #include "fsm.h"
@@ -75,6 +77,9 @@ void fsm_on_event(unsigned char event) {
             break;
         case FSM_EVT_ENTRY_INCOMPLETE:
             Serial.println(F("\r\nIncomplete entry - cleared."));
+            break;
+        case FSM_EVT_BATTERY_LOW:
+            Serial.println(F("\r\nLOW BATTERY - replace the 9 V cell soon."));
             break;
         default:
             break;
